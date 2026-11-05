@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --bg: #f4f6f5;
   --surface: #ffffff;
@@ -249,3 +250,30 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .tbadge { position: absolute; top: 8px; left: calc(50% + 6px); min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px;
   background: var(--danger); color: #fff; font: 600 11px/17px system-ui, sans-serif; font-style: normal; text-align: center; }
 .bell { width: 14px; height: 14px; vertical-align: -2px; color: var(--muted); }
+
+/* Vehicles */
+.tabbar button { font-size: 11px; }
+.vgrid { display: grid; gap: 12px; }
+.vcard { overflow: hidden; }
+.vhead { display: flex; align-items: center; gap: 12px; padding: 14px 14px 10px; }
+.vhead .t { font-weight: 700; font-size: 16px; }
+.vhead .m { font-size: 12.5px; color: var(--muted); letter-spacing: .02em; }
+.vhead .main { flex: 1; min-width: 0; }
+.vico { width: 40px; height: 40px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; flex: none; }
+.vico.sm { width: 32px; height: 32px; border-radius: 10px; }
+.vico.sm svg { width: 18px; height: 18px; }
+.odo { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 14px 6px; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
+.odo .k { font-size: 12px; color: var(--muted); }
+.odo b { font-size: 18px; font-variant-numeric: tabular-nums; }
+.odo .m { font-size: 12px; color: var(--muted); }
+.warn-text { color: var(--warn) !important; }
+.vcard .list .row:first-child { border-top: 1px solid var(--line); }
+.vcard .m { white-space: normal; }
+.vfoot { display: flex; justify-content: space-between; padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+.hint { font-size: 13px; color: var(--muted); margin: 4px 0 8px; }
+.dpill { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; background: var(--surface-2); color: var(--muted); font-variant-numeric: tabular-nums; }
+.dpill.soon { background: var(--warn-soft); color: var(--warn); }
+.dpill.overdue { background: var(--danger-soft); color: var(--danger); }
+.duecard .morerow { width: 100%; justify-content: center; border-left: 0; border-right: 0; border-bottom: 0; background: none; font-size: 13px; }
+.duecard .nudge { background: var(--warn-soft); }
+.duecard .nudge .m { color: var(--warn); white-space: normal; }

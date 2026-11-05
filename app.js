@@ -70,7 +70,7 @@ function download(name, text, type) {
 const CATS = {
   essentials: ['Household', 'Toiletries & personal care', 'Cleaning supplies', 'Kitchenware', 'Appliances', 'Repairs & maintenance', 'Health & medicines', 'Other'],
   lifestyle: ['Gadgets & electronics', 'Clothing & footwear', 'Home décor', 'Furniture', 'Hobbies & sports', 'Books & learning', 'Travel gear', 'Other'],
-  expense: ['Food & dining', 'Groceries', 'Transport & fuel', 'Bills & utilities', 'Rent', 'Health', 'Essentials', 'Lifestyle', 'Entertainment', 'Education', 'Travel', 'EMI & loans', 'Gifts', 'Personal care', 'Other'],
+  expense: ['Food & dining', 'Groceries', 'Transport & fuel', 'Vehicle', 'Bills & utilities', 'Rent', 'Health', 'Essentials', 'Lifestyle', 'Entertainment', 'Education', 'Travel', 'EMI & loans', 'Gifts', 'Personal care', 'Other'],
   bill: ['Electricity', 'Water', 'Phone & internet', 'Subscriptions & OTT', 'Insurance', 'EMI & loan', 'Rent', 'Credit card', 'Other'],
   pay: ['UPI', 'Card', 'Cash', 'Net banking', 'Other'],
 };
@@ -80,7 +80,7 @@ const PRIO = { high: 0, medium: 1, low: 2 };
 
 // ---------- storage ----------
 const KEY = 'ph:data';
-const COLS = ['purchases', 'expenses', 'bills', 'notes'];
+const COLS = ['purchases', 'expenses', 'bills', 'notes', 'vehicles'];
 const Store = {
   data: {},
   load() {
@@ -160,7 +160,11 @@ const Sync = {
     this.client.requestAccessToken({ prompt: this.connected() ? '' : 'consent' });
   },
   onToken(r) {
-    if (r.error) { this.setStatus('error', 'Sign-in failed'); return; }
+    if (r.error) { this.fail('Google sign-in did not finish (' + r.error + '). Tap the sync button to try again.'); return; }
+    if (r.scope && !r.scope.includes('drive.file')) {
+      this.fail('Google Drive permission was not given. Open Settings, tap Reconnect, and tick the box for Google Drive files.');
+      return;
+    }
     this.token = r.access_token; this.exp = now() + r.expires_in * 1000;
     LS.set('ph:token', JSON.stringify({ t: this.token, e: this.exp }));
     LS.set('ph:connected', '1');
@@ -184,7 +188,24 @@ const Sync = {
     const b = $('#syncBtn'); if (!b) return;
     b.dataset.state = state; $('#syncLabel').textContent = label || labels[state];
   },
-  tap() { if (this.valid()) this.sync(); else this.signIn(); },
+  // Remember why sync failed, in plain words, so Settings can show it.
+  lastError: LS.get('ph:syncError') || '',
+  fail(msg) { this.lastError = msg; LS.set('ph:syncError', msg); this.setStatus('error'); },
+  explain(e) {
+    const t = `${e.message} ${e.reason || ''} ${e.detail || ''}`;
+    if (e instanceof TypeError || /Failed to fetch|NetworkError/i.test(t))
+      return 'Could not reach Google. Check the internet connection. If an ad or tracker blocker is on, allow this site.';
+    if (/accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled/i.test(t))
+      return 'The Google Drive API is turned off in your Google Cloud project. Go to console.cloud.google.com → APIs & Services → Library → Google Drive API → Enable (setup guide, Step 2.3). Wait 2 minutes, then tap Sync now.';
+    if (/insufficient|SCOPE|PERMISSION_DENIED/i.test(t))
+      return 'Google Drive permission was not given. Tap Reconnect below and tick the box for Google Drive files.';
+    if (/ 429|rateLimit/i.test(t)) return 'Google asked the app to slow down. It will try again in a minute.';
+    return 'Google returned an error: ' + (e.detail || e.message) + '. Tap Sync now to retry.';
+  },
+  tap() {
+    if (this.state === 'error' && this.lastError) toast('Sync failed. Open Settings (⚙) to see why.');
+    if (this.valid()) this.sync(); else this.signIn();
+  },
   schedule() {
     if (!this.connected()) return;
     if (!navigator.onLine) return this.setStatus('offline');
@@ -195,7 +216,13 @@ const Sync = {
   async api(url, opts = {}) {
     const res = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + this.token, ...(opts.headers || {}) } });
     if (res.status === 401) { this.token = null; this.exp = 0; LS.del('ph:token'); throw new Error('auth'); }
-    if (!res.ok) throw new Error('Drive error ' + res.status);
+    if (!res.ok) {
+      let j = null; try { j = await res.json(); } catch {}
+      const err = new Error('Google error ' + res.status);
+      err.reason = j?.error?.errors?.[0]?.reason || j?.error?.status || '';
+      err.detail = j?.error?.message || '';
+      throw err;
+    }
     return res;
   },
   async findFile() {
@@ -244,12 +271,14 @@ const Sync = {
         LS.set('ph:fileId', (await r.json()).id);
       }
       this.lastSync = now(); LS.set('ph:lastSync', this.lastSync);
+      this.lastError = ''; LS.del('ph:syncError');
       this.setStatus('synced');
       if (!$('#sheet').open) render();
     } catch (e) {
       console.error(e);
       if (e.message === 'auth') this.setStatus('pending', 'Tap to sync');
-      else this.setStatus(navigator.onLine ? 'error' : 'offline');
+      else if (!navigator.onLine) this.setStatus('offline');
+      else this.fail(this.explain(e));
     } finally {
       this.busy = false;
       if (this.again) { this.again = false; this.schedule(); }
@@ -285,6 +314,22 @@ const Reminders = {
       extendedProperties: { private: { personalHubBill: b.id } },
     };
   },
+  vehicleEvent(v, it, d) {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata', days = +it.remind || 0;
+    const overrides = [{ method: 'popup', minutes: 0 }];
+    if (days) overrides.push({ method: 'popup', minutes: Math.min(days * 1440, 40320) });
+    const exp = it.mode === 'expiry', who = v.name + (v.reg ? ` (${v.reg})` : '');
+    return {
+      summary: `${it.name} ${exp ? 'expires' : 'due'}: ${who}`,
+      description: exp ? `Renew before it expires. Mark it renewed in Personal Hub.`
+        : `${d.dueKm != null ? `Due at ${km(d.dueKm)}${d.by === 'km' ? ' (date estimated from your driving; it moves when you update km)' : ''}. ` : ''}Mark it done in Personal Hub.`,
+      start: { dateTime: `${d.date}T${REMIND_HOUR}:00`, timeZone: tz },
+      end: { dateTime: `${d.date}T09:15:00`, timeZone: tz },
+      reminders: { useDefault: false, overrides },
+      transparency: 'transparent',
+      extendedProperties: { private: { personalHubVehicle: `${v.id}:${it.id}` } },
+    };
+  },
   setError(msg) { this.error = msg; msg ? LS.set('ph:calError', msg) : LS.del('ph:calError'); },
   async sync() {
     const call = (url, method, body) => Sync.api(url, { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
@@ -305,6 +350,28 @@ const Reminders = {
           Store.put('bills', { ...b, calEventId: null, calSig: null });
         }
       }
+      for (const v of all('vehicles')) {
+        let changed = false; const items = [];
+        for (const it of v.items || []) {
+          const d = itemDue(v, it), on = it.remind != null && it.remind !== 'off';
+          let n = it;
+          if (on && d.date && d.date >= today()) {
+            const sig = JSON.stringify([v.name, v.reg, it.name, d.date, it.remind]);
+            if (!(it.calEventId && it.calSig === sig)) {
+              const body = this.vehicleEvent(v, it, d);
+              let ev = null;
+              if (it.calEventId) { try { ev = await (await call(`${CAL}/${it.calEventId}`, 'PUT', body)).json(); } catch (e) { if (!/ 404| 410/.test(e.message)) throw e; } }
+              if (!ev) ev = await (await call(CAL, 'POST', body)).json();
+              n = { ...it, calEventId: ev.id, calSig: sig }; changed = true;
+            }
+          } else if (it.calEventId && (!on || !d.date)) {
+            try { await call(`${CAL}/${it.calEventId}`, 'DELETE'); } catch (e) { if (!/ 40[34]| 410/.test(e.message)) throw e; }
+            n = { ...it, calEventId: null, calSig: null }; changed = true;
+          } // overdue items keep their past event
+          items.push(n);
+        }
+        if (changed) Store.put('vehicles', { ...v, items });
+      }
       Store.persist(); this.setError('');
     } catch (e) {
       if (e.message === 'auth') throw e;
@@ -312,7 +379,7 @@ const Reminders = {
       this.setError(/ 403/.test(e.message) ? 'perm' : 'fail');
     }
   },
-  count: () => all('bills').filter((b) => Reminders.wanted(b)).length,
+  count: () => all('bills').filter((b) => Reminders.wanted(b)).length + all('vehicles').reduce((a, v) => a + (v.items || []).filter((i) => i.remind && i.remind !== 'off').length, 0),
 };
 
 // ---------- sheet (dialog) & forms ----------
@@ -645,6 +712,288 @@ function vNotes() {
   return `<input class="search" id="noteSearch" type="search" placeholder="Search notes" value="${esc(UI.noteQuery)}"><div id="notesGrid">${notesGrid()}</div>`;
 }
 
+// ---------- vehicles ----------
+const VTYPE = { car: 'Car', bike: 'Two-wheeler' };
+const kmFmt = new Intl.NumberFormat('en-IN');
+const km = (n) => kmFmt.format(Math.round(+n || 0)) + ' km';
+const addDays = (iso, n) => { const d = parseISO(iso); d.setDate(d.getDate() + Math.round(n)); return localISO(d); };
+const V_REMIND = [['off', 'No reminder'], ['0', 'On the due date'], ['1', '1 day before'], ['3', '3 days before'], ['7', '1 week before'], ['14', '2 weeks before'], ['28', '4 weeks before']];
+// Starting intervals. Edit them per vehicle to match your owner's manual.
+const VDEFAULTS = {
+  car: [
+    { kind: 'service', name: 'General service', mode: 'interval', everyKm: 10000, everyMonths: 12, remind: '7' },
+    { kind: 'alignment', name: 'Wheel alignment', mode: 'interval', everyKm: 5000, everyMonths: 6, remind: '7' },
+    { kind: 'puc', name: 'PUC certificate', mode: 'expiry', renewMonths: 6, remind: '7' },
+    { kind: 'insurance', name: 'Insurance', mode: 'expiry', renewMonths: 12, remind: '14' },
+  ],
+  bike: [
+    { kind: 'service', name: 'General service', mode: 'interval', everyKm: 3000, everyMonths: 3, remind: '7' },
+    { kind: 'puc', name: 'PUC certificate', mode: 'expiry', renewMonths: 6, remind: '7' },
+    { kind: 'insurance', name: 'Insurance', mode: 'expiry', renewMonths: 12, remind: '14' },
+  ],
+};
+const ICON = {
+  car: '<svg viewBox="0 0 24 24"><path d="M5 11l1.5-4.2A2 2 0 0 1 8.4 5.5h7.2a2 2 0 0 1 1.9 1.3L19 11"/><rect x="3" y="11" width="18" height="6" rx="2"/><path d="M6 17v2M18 17v2"/><circle cx="7.5" cy="14" r=".6"/><circle cx="16.5" cy="14" r=".6"/></svg>',
+  bike: '<svg viewBox="0 0 24 24"><circle cx="5.5" cy="16" r="3"/><circle cx="18.5" cy="16" r="3"/><path d="M5.5 16h6l3.5-6.5h2.5l1 6.5"/><path d="M15 9.5 13 6.5h-3"/></svg>',
+};
+
+// Average km per day, from your odometer updates (needs readings at least 2 weeks apart).
+function kmRate(v) {
+  const log = (v.odoLog || []).filter((x) => x.date && x.km != null).sort((a, b) => a.date.localeCompare(b.date));
+  if (log.length < 2) return null;
+  const a = log[0], b = log[log.length - 1], days = (parseISO(b.date) - parseISO(a.date)) / 864e5;
+  return days >= 14 && b.km > a.km ? (b.km - a.km) / days : null;
+}
+// When an item is due: by date, by km (date estimated from your driving), whichever comes first.
+function itemDue(v, it) {
+  if (it.mode === 'expiry') return it.expires ? { date: it.expires, days: daysUntil(it.expires), by: 'date' } : { unknown: true };
+  const dateDue = it.lastDate && +it.everyMonths ? addMonths(it.lastDate, +it.everyMonths) : null;
+  const dueKm = it.lastKm != null && it.lastKm !== '' && +it.everyKm ? +it.lastKm + +it.everyKm : null;
+  if (!dateDue && dueKm == null) return { unknown: true };
+  const kmLeft = dueKm != null && v.odo != null ? dueKm - v.odo : null, rate = kmRate(v);
+  const kmDate = kmLeft != null && rate ? addDays(v.odoDate || today(), Math.max(0, kmLeft) / rate) : null;
+  let date = dateDue, by = 'date';
+  if (kmDate && (!date || kmDate < date)) { date = kmDate; by = 'km'; }
+  // If the reading is over a week old, estimate today's km from your usual driving
+  const age = v.odoDate ? -daysUntil(v.odoDate) : 0;
+  const estLeft = kmLeft != null && rate && age > 7 ? Math.round(kmLeft - rate * age) : null;
+  return { date, days: date ? daysUntil(date) : null, by, dueKm, kmLeft, estLeft };
+}
+function itemState(it, d) {
+  if (d.unknown) return 'unknown';
+  if ((d.days != null && d.days < 0) || (d.kmLeft != null && d.kmLeft <= 0)) return 'overdue';
+  if ((d.days != null && d.days <= 14) || (d.kmLeft != null && +it.everyKm && d.kmLeft <= +it.everyKm * 0.1)) return 'soon';
+  return 'ok';
+}
+function vehicleDues() {
+  const rank = { overdue: 0, soon: 1, ok: 2, unknown: 3 }, out = [];
+  all('vehicles').forEach((v) => (v.items || []).forEach((it) => { const d = itemDue(v, it); out.push({ v, it, d, state: itemState(it, d) }); }));
+  return out.sort((a, b) => rank[a.state] - rank[b.state] || (a.d.date || '9999').localeCompare(b.d.date || '9999'));
+}
+function daysText(n) {
+  if (n == null) return '';
+  if (n < 0) return `${-n} day${n === -1 ? '' : 's'} ago`;
+  if (n === 0) return 'today';
+  if (n === 1) return 'tomorrow';
+  if (n < 60) return `in ${n} days`;
+  return `in ${Math.round(n / 30.4)} months`;
+}
+function dueLine(it, d) {
+  if (d.unknown) return it.mode === 'expiry' ? 'Add the expiry date' : 'Set when it was last done';
+  const parts = [];
+  if (it.mode === 'expiry') parts.push(`${d.days < 0 ? 'Expired' : 'Expires'} ${fmtDate(d.date)} · ${daysText(d.days)}`);
+  else {
+    if (d.date) parts.push(`${d.by === 'km' ? 'About ' : 'Due '}${fmtDate(d.date)}${d.days < 0 ? ' · ' + daysText(d.days) : ''}`);
+    const left = d.estLeft != null ? d.estLeft : d.kmLeft, about = d.estLeft != null ? 'about ' : '';
+    if (left != null) parts.push(left > 0 ? `${about}${km(left)} left` : `${about}${km(-left)} over`);
+  }
+  return parts.join(' · ');
+}
+function stateBadge(it, state) {
+  if (state === 'overdue') return ` <span class="badge late">${it.mode === 'expiry' ? 'Expired' : 'Overdue'}</span>`;
+  if (state === 'soon') return ' <span class="badge due">Due soon</span>';
+  return '';
+}
+// Pill shown on the dashboard card: days left, coloured by urgency
+function duePill(it, d, state) {
+  let t;
+  if (d.unknown) t = 'Set date';
+  else if (state === 'overdue') t = it.mode === 'expiry' ? 'Expired' : d.kmLeft != null && d.kmLeft <= 0 && !(d.days < 0) ? `${kmFmt.format(-d.kmLeft)} km over` : `${-d.days}d overdue`;
+  else if (d.days === 0) t = 'Today';
+  else t = d.days < 60 ? `${d.days} day${d.days === 1 ? '' : 's'}` : `${Math.round(d.days / 30.4)} mo`;
+  return `<span class="dpill ${state}">${t}</span>`;
+}
+const vItem = (v, itemId) => (v.items || []).find((i) => i.id === itemId);
+const odoAge = (v) => (v.odoDate ? -daysUntil(v.odoDate) : null);
+
+function vehicleForm(v = {}) {
+  const isNew = !v.id, type = v.type || 'car';
+  const fields = [
+    [{ name: 'name', label: 'Name', required: true, ph: 'e.g. Swift, Activa' }, { name: 'type', label: 'Type', type: 'select', options: Object.entries(VTYPE), value: type }],
+    [{ name: 'reg', label: 'Registration no.', ph: 'KL 07 AB 1234' }, { name: 'odo', label: 'Current km reading', type: 'number', required: true }],
+  ];
+  if (isNew) fields.push(
+    [{ name: 'svcDate', label: 'Last service date', type: 'date' }, { name: 'svcKm', label: 'km at that service', type: 'number' }],
+    [{ name: 'alDate', label: 'Last wheel alignment', type: 'date' }, { name: 'alKm', label: 'km at alignment', type: 'number' }],
+    [{ name: 'pucExp', label: 'PUC expires on', type: 'date' }, { name: 'insExp', label: 'Insurance expires on', type: 'date' }],
+  );
+  formSheet({
+    title: isNew ? 'Add vehicle' : 'Edit vehicle', values: { ...v, odo: v.odo ?? '' },
+    extra: isNew ? '<p class="hint">Leave blank anything you don\'t know. You can fill it in later. Service intervals start with common values; change them to match your owner\'s manual.</p>' : '',
+    fields,
+    onSubmit: (f) => {
+      if (!isNew) {
+        const rec = { ...v, name: f.name, type: f.type, reg: f.reg.toUpperCase() };
+        if (f.odo != null && f.odo !== v.odo) Object.assign(rec, logKm(v, f.odo, today()));
+        Store.put('vehicles', rec); commit('Saved'); return;
+      }
+      for (const k of ['svcKm', 'alKm']) if (f[k] != null && f[k] > f.odo) { toast(`km at the last ${k === 'svcKm' ? 'service' : 'alignment'} is more than the current reading`); return false; }
+      const items = VDEFAULTS[f.type].map((d) => ({ ...d, id: uid() }));
+      const set = (kind, o) => { const it = items.find((i) => i.kind === kind); if (it) Object.assign(it, o); };
+      set('service', { lastDate: f.svcDate || null, lastKm: f.svcKm });
+      set('alignment', { lastDate: f.alDate || null, lastKm: f.alKm });
+      set('puc', { expires: f.pucExp || null });
+      set('insurance', { expires: f.insExp || null });
+      const odoLog = [{ date: today(), km: f.odo }];
+      if (f.svcDate && f.svcKm != null) odoLog.push({ date: f.svcDate, km: f.svcKm });
+      if (f.type === 'car' && f.alDate && f.alKm != null) odoLog.push({ date: f.alDate, km: f.alKm });
+      Store.put('vehicles', { name: f.name, type: f.type, reg: f.reg.toUpperCase(), odo: f.odo, odoDate: today(), odoLog, items, history: [] });
+      UI.tab = 'vehicles'; LS.set('ph:tab', 'vehicles');
+      commit('Vehicle added');
+    },
+    onDelete: isNew ? null : () => {
+      (v.items || []).forEach((i) => Reminders.forget(i.calEventId));
+      Store.del('vehicles', v.id); commit('Vehicle deleted');
+    },
+    after: (form) => {
+      const al = form.elements.alDate?.closest('.grid2');
+      const sync = () => { if (al) al.hidden = form.elements.type.value !== 'car'; };
+      form.elements.type.addEventListener('change', sync); sync();
+    },
+  });
+}
+// Returns the odometer fields after a new reading (keeps the last 40 readings).
+function logKm(v, reading, date) {
+  const odoLog = [...(v.odoLog || []), { date, km: reading }].sort((a, b) => a.date.localeCompare(b.date)).slice(-40);
+  const latest = odoLog[odoLog.length - 1];
+  return { odo: latest.km, odoDate: latest.date, odoLog };
+}
+function kmForm(v) {
+  formSheet({
+    title: 'Update km: ' + v.name, submit: 'Update',
+    fields: [{ name: 'odo', label: `Odometer reading (last: ${km(v.odo)})`, type: 'amount', required: true }, { name: 'date', label: 'Date', type: 'date', value: today(), required: true }],
+    after: (form) => { form.elements.odo.placeholder = 'km'; },
+    onSubmit: (f) => {
+      if (f.odo < v.odo && f.date >= (v.odoDate || '')) { toast(`That is lower than the last reading (${km(v.odo)})`); return false; }
+      Store.put('vehicles', { ...v, ...logKm(v, f.odo, f.date) }); commit('km updated');
+    },
+  });
+}
+function itemForm(v, it = null) {
+  const isNew = !it; it = it || { mode: 'interval', remind: '7' };
+  const interval = [[{ name: 'everyKm', label: 'Every (km)', type: 'number' }, { name: 'everyMonths', label: 'Or every (months)', type: 'number' }],
+    [{ name: 'lastDate', label: 'Last done on', type: 'date' }, { name: 'lastKm', label: 'km when last done', type: 'number' }]];
+  const expiry = [[{ name: 'expires', label: 'Expires on', type: 'date' }, { name: 'renewMonths', label: 'Valid for (months)', type: 'number' }]];
+  const fields = [{ name: 'name', label: 'Item', required: true, ph: 'e.g. Tyre rotation, Battery check' }];
+  if (isNew) fields.push({ name: 'mode', label: 'Kind', type: 'select', options: [['interval', 'Repeats every few km or months'], ['expiry', 'Has an expiry date (renewal)']] });
+  if (isNew || it.mode === 'interval') fields.push(...interval);
+  if (isNew || it.mode === 'expiry') fields.push(...expiry);
+  fields.push({ name: 'remind', label: 'Remind me', type: 'select', options: V_REMIND });
+  formSheet({
+    title: isNew ? `Add item: ${v.name}` : it.name, values: it,
+    extra: it.kind === 'puc' ? '<p class="hint">PUC validity is printed on your certificate (usually 6 or 12 months).</p>' : '',
+    fields,
+    onSubmit: (f) => {
+      const mode = f.mode || it.mode;
+      const rec = { ...it, ...f, mode, id: it.id || uid(), kind: it.kind || 'custom', lastDate: f.lastDate || null, expires: f.expires || null };
+      if (mode === 'interval' && !rec.everyKm && !rec.everyMonths) { toast('Enter km, months, or both'); return false; }
+      const items = isNew ? [...(v.items || []), rec] : v.items.map((i) => (i.id === it.id ? rec : i));
+      Store.put('vehicles', { ...v, items }); commit(isNew ? 'Item added' : 'Saved');
+    },
+    onDelete: isNew ? null : () => {
+      Reminders.forget(it.calEventId);
+      Store.put('vehicles', { ...v, items: v.items.filter((i) => i.id !== it.id) }); commit('Item deleted');
+    },
+    after: (form) => {
+      if (!isNew) return;
+      const groups = (names) => names.map((n) => form.elements[n].closest('.grid2'));
+      const sync = () => {
+        const exp = form.elements.mode.value === 'expiry';
+        groups(['everyKm', 'lastDate']).forEach((g) => { g.hidden = exp; });
+        groups(['expires']).forEach((g) => { g.hidden = !exp; });
+      };
+      form.elements.mode.addEventListener('change', sync); sync();
+    },
+  });
+}
+function doneForm(v, it) {
+  const exp = it.mode === 'expiry';
+  const nextExp = exp ? addDays(addMonths(it.expires && it.expires >= today() ? it.expires : today(), +it.renewMonths || 12), it.expires && it.expires >= today() ? 0 : -1) : null;
+  const fields = exp
+    ? [[{ name: 'date', label: 'Renewed on', type: 'date', value: today(), required: true }, { name: 'expires', label: 'New expiry date', type: 'date', value: nextExp, required: true }]]
+    : [[{ name: 'date', label: 'Done on', type: 'date', value: today(), required: true }, { name: 'km', label: 'km reading', type: 'number', value: v.odo, required: true }]];
+  fields.push({ name: 'cost', label: 'Cost (₹)', type: 'number' },
+    { name: 'notes', label: exp ? 'Notes' : 'Garage / notes', ph: exp ? (it.kind === 'insurance' ? 'Insurer, policy no.' : 'Testing centre') : 'Garage, work done' },
+    { name: 'addExpense', label: 'Add cost to Expenses', type: 'check', value: true });
+  formSheet({
+    title: (exp ? 'Renewed: ' : 'Done: ') + it.name, submit: exp ? 'Save renewal' : 'Mark done', fields,
+    onSubmit: (f) => {
+      let rec = { ...v };
+      // Record the reading, unless it is lower than a newer one (keeps the odometer from going backwards)
+      if (!exp && f.km != null && (f.km >= (v.odo || 0) || f.date < (v.odoDate || ''))) Object.assign(rec, logKm(v, f.km, f.date));
+      let expenseId = null;
+      if (f.addExpense && f.cost) expenseId = Store.put('expenses', { amount: f.cost, date: f.date, category: 'Vehicle', note: `${v.name}: ${it.name}`, pay: 'UPI', vehicleId: v.id }).id;
+      const upd = exp ? { expires: f.expires } : { lastDate: f.date, lastKm: f.km };
+      rec.items = v.items.map((i) => (i.id === it.id ? { ...i, ...upd } : i));
+      rec.history = [...(v.history || []), { id: uid(), item: it.name, date: f.date, km: exp ? null : f.km, cost: f.cost, notes: f.notes, expires: exp ? f.expires : null, expenseId }];
+      Store.put('vehicles', rec);
+      const next = itemDue(rec, rec.items.find((i) => i.id === it.id));
+      commit(next.date ? `Saved · next ${exp ? 'expiry' : 'due'} ${fmtDate(next.date)}` : 'Saved');
+    },
+  });
+}
+function historySheet(v) {
+  const h = [...(v.history || [])].sort((a, b) => b.date.localeCompare(a.date));
+  openSheet(`
+    <div class="sheet-head"><h2>${esc(v.name)} history</h2><button type="button" class="icon-btn" data-act="close" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="sheet-body" style="padding-bottom:24px">
+      <div class="card summary"><div>Total spent<b>${money(sum(h, 'cost'))}</b></div><div style="text-align:right">Entries<b>${h.length}</b></div></div>
+      ${h.length ? `<div class="card list">${h.map((x) => `<div class="row"><div class="main" style="cursor:default"><div class="t">${esc(x.item)}</div>
+        <div class="m">${fmtDate(x.date)}${x.km != null ? ' · ' + km(x.km) : ''}${x.expires ? ' · valid till ' + fmtDate(x.expires) : ''}${x.notes ? ' · ' + esc(x.notes) : ''}</div></div>
+        <div class="amt">${x.cost ? money(x.cost) : '—'}</div></div>`).join('')}</div>`
+        : '<div class="card empty"><b>No history yet</b>Services and renewals you mark as done appear here.</div>'}
+    </div>`);
+}
+function vehicleCard(v) {
+  const age = odoAge(v), stale = age != null && age > 30;
+  const rows = (v.items || []).map((it) => {
+    const d = itemDue(v, it), st = itemState(it, d);
+    return `<div class="row"><div class="main" data-act="v-item" data-id="${v.id}" data-item="${it.id}">
+        <div class="t">${esc(it.name)}${stateBadge(it, st)}</div><div class="m${st === 'overdue' ? ' late-text' : ''}">${dueLine(it, d)}</div></div>
+      ${d.unknown ? `<button class="pill-btn ghost" data-act="v-item" data-id="${v.id}" data-item="${it.id}">Set</button>`
+        : `<button class="pill-btn" data-act="v-done" data-id="${v.id}" data-item="${it.id}">${it.mode === 'expiry' ? 'Renewed' : 'Done'}</button>`}</div>`;
+  }).join('');
+  return `<div class="card vcard">
+    <div class="vhead"><span class="vico">${ICON[v.type] || ICON.car}</span>
+      <div class="main"><div class="t">${esc(v.name)}</div><div class="m">${esc(v.reg || VTYPE[v.type])}${v.reg ? ' · ' + VTYPE[v.type] : ''}</div></div>
+      <button class="icon-btn" data-act="v-edit" data-id="${v.id}" aria-label="Edit vehicle"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg></button></div>
+    <div class="odo"><div><div class="k">Odometer</div><b>${km(v.odo)}</b>
+      <div class="m${stale ? ' warn-text' : ''}">${age == null ? '' : age === 0 ? 'updated today' : `updated ${age} day${age === 1 ? '' : 's'} ago`}${stale ? ' · please update' : ''}</div></div>
+      <button class="pill-btn" data-act="v-km" data-id="${v.id}">Update km</button></div>
+    <div class="list">${rows || '<div class="empty">No items. Add one below.</div>'}</div>
+    <div class="vfoot"><button class="linkish" data-act="v-additem" data-id="${v.id}">+ Add item</button>
+      <button class="linkish" data-act="v-history" data-id="${v.id}">History (${(v.history || []).length})</button></div>
+  </div>`;
+}
+function vVehicles() {
+  const vs = all('vehicles').sort((a, b) => a.createdAt - b.createdAt);
+  if (!vs.length) return `<div class="card empty"><b>No vehicles yet</b>Add your car or two-wheeler to track service, wheel alignment, PUC and insurance dates.
+    <div style="margin-top:14px"><button class="pill-btn" data-act="v-add">Add vehicle</button></div></div>`;
+  const dues = vehicleDues(), over = dues.filter((x) => x.state === 'overdue').length, soon = dues.filter((x) => x.state === 'soon').length;
+  const y = today().slice(0, 4), spent = sum(all('expenses').filter((e) => e.category === 'Vehicle' && (e.date || '').startsWith(y)));
+  return `<div class="card summary"><div>Needs attention<b>${over ? `<span class="late-text">${over} overdue</span>` : '0 overdue'}${soon ? ` · ${soon} soon` : ''}</b></div>
+      <div style="text-align:right">Spent in ${y}<b>${money(spent)}</b></div></div>
+    <div class="vgrid">${vs.map(vehicleCard).join('')}</div>`;
+}
+// Dashboard: every vehicle due date in one place (separate from bills)
+function vehicleDueCard() {
+  const vs = all('vehicles');
+  if (!vs.length) return `<div class="section"><h2>Vehicle due dates</h2></div>
+    <div class="card empty" style="padding:18px"><b>Track service, PUC and insurance</b>Add your car or two-wheeler and the due dates show up here.
+      <div style="margin-top:12px"><button class="pill-btn" data-act="v-add">Add vehicle</button></div></div>`;
+  const dues = vehicleDues(), shown = dues.slice(0, 6), more = dues.length - shown.length;
+  const stale = vs.filter((v) => odoAge(v) > 30);
+  return `<div class="section"><h2>Vehicle due dates</h2><button class="linkish" data-act="tab" data-tab="vehicles">All vehicles</button></div>
+    <div class="card list duecard">${shown.map(({ v, it, d, state }) => `<div class="row" data-act="tab" data-tab="vehicles" style="cursor:pointer">
+        <span class="vico sm">${ICON[v.type] || ICON.car}</span>
+        <div class="main"><div class="t">${esc(it.name)}</div><div class="m">${esc(v.name)} · ${d.unknown ? 'date not set' : (it.mode === 'expiry' ? 'expires ' : d.by === 'km' ? 'about ' : 'due ') + fmtDate(d.date)}</div></div>
+        ${duePill(it, d, state)}</div>`).join('')}
+      ${more > 0 ? `<button class="row linkish morerow" data-act="tab" data-tab="vehicles">${more} more</button>` : ''}
+      ${stale.map((v) => `<div class="row nudge"><div class="main" style="cursor:default"><div class="m">${esc(v.name)} km last updated ${odoAge(v)} days ago. km-based dates may be off.</div></div>
+        <button class="pill-btn ghost" data-act="v-km" data-id="${v.id}">Update km</button></div>`).join('')}
+    </div>`;
+}
+
 // ---------- dashboard ----------
 // Vertical bars in plain HTML. cols: [{ label, parts: [{ v, cls }], tip, hi, show }]
 function vbars(cols) {
@@ -707,15 +1056,16 @@ function vHome() {
       <div class="card stat" data-act="tab" data-tab="buy" style="cursor:pointer"><div class="k">To buy</div><div class="v">${money(sum(planned, 'estimate'))}</div><div class="s">${planned.length} item${planned.length === 1 ? '' : 's'}</div></div>
       <div class="card stat" data-act="tab" data-tab="buy" style="cursor:pointer"><div class="k">Bought</div><div class="v">${money(sum(boughtNow, 'actualPrice'))}</div><div class="s">this month</div></div>
     </div>
-    ${empty ? '<div class="card empty" style="margin-top:12px"><b>Welcome to Personal Hub</b>Tap + to log your first expense, or use the tabs below to plan purchases, add bills and keep notes. Charts appear here as you go.</div>' : `
-    <div class="section"><h2>Spending, last 6 months</h2></div>
-    <div class="card chart"><div class="chart-head"><span>Monthly average <b>${money(avg)}</b></span><span>This month <b>${money(spent)}</b></span></div>${trend}</div>
+    ${soon.length ? `<div class="section"><h2>Bills due this week</h2><button class="linkish" data-act="tab" data-tab="bills">All bills</button></div><div class="card list">${soon.slice(0, 5).map(billRow).join('')}</div>` : ''}
     ${cats.length ? `<div class="section"><h2>Where it went in ${monthLabel(m, true).split(' ')[0]}</h2><button class="linkish" data-act="tab" data-tab="spend">Details</button></div>
     <div class="card bars">${cats.map(([c, v]) => `<div class="bar"><div class="lab"><span>${esc(c)}<span class="pct">${Math.round((v / spent) * 100)}%</span></span><span>${money(v)}</span></div>
       <div class="track"><div class="fill" style="width:${Math.max(2, (v / cmax) * 100)}%"></div></div></div>`).join('')}</div>` : ''}
+    ${vehicleDueCard()}
+    ${empty ? '<div class="card empty" style="margin-top:12px"><b>Welcome to Personal Hub</b>Tap + to log your first expense, or use the tabs below to plan purchases, add bills and keep notes. Charts appear here as you go.</div>' : `
+    <div class="section"><h2>Spending, last 6 months</h2></div>
+    <div class="card chart"><div class="chart-head"><span>Monthly average <b>${money(avg)}</b></span><span>This month <b>${money(spent)}</b></span></div>${trend}</div>
     ${planned.length ? `<div class="section"><h2>Purchase plan by month</h2><button class="linkish" data-act="tab" data-tab="buy">Full plan</button></div>
     <div class="card chart"><div class="legend"><span><i></i>Essentials <b>${money(est(planned, 'essentials'))}</b></span><span><i class="life"></i>Lifestyle <b>${money(est(planned, 'lifestyle'))}</b></span></div>${plan}</div>` : ''}`}
-    ${soon.length ? `<div class="section"><h2>Bills due this week</h2><button class="linkish" data-act="tab" data-tab="bills">All bills</button></div><div class="card list">${soon.slice(0, 5).map(billRow).join('')}</div>` : ''}
     ${planned.length ? `<div class="section"><h2>Next to buy</h2></div><div class="card list">${planned.slice(0, 4).map(purchaseRow).join('')}</div>` : ''}
     ${pinned.length ? `<div class="section"><h2>Pinned notes</h2></div><div class="notes">${pinned.map(noteCard).join('')}</div>` : ''}
     ${recent.length ? `<div class="section"><h2>Recent expenses</h2><button class="linkish" data-act="tab" data-tab="spend">See all</button></div><div class="card list">${recent.map(expenseRow).join('')}</div>` : ''}`;
@@ -753,13 +1103,14 @@ function settings() {
     <div class="sheet-body" style="padding-bottom:24px">
       <div class="card setting"><h3>Google Drive</h3>
         ${clientId() ? '' : '<div class="warnbox">Google sign-in is not set up yet. Paste your Client ID into config.js (see the setup guide, Step 1).</div>'}
+        ${Sync.state === 'error' && Sync.lastError ? `<div class="warnbox" style="color:var(--danger);background:var(--danger-soft)"><b>Sync failed.</b> ${esc(Sync.lastError)}</div>` : ''}
         <p>${c ? `Connected. ${Sync.lastSync ? 'Last synced ' + ago(Sync.lastSync) + '.' : ''} Your data is in Drive → <b>${FOLDER_NAME}</b> → ${FILE_NAME}.` : 'Not connected. Your data is saved on this device only.'}</p>
-        <div class="actions">${c ? '<button class="pill-btn" data-act="sync-now">Sync now</button><button class="pill-btn ghost" data-act="disconnect">Disconnect</button>' : '<button class="pill-btn" data-act="sync-now">Connect Google Drive</button>'}</div></div>
+        <div class="actions">${c ? '<button class="pill-btn" data-act="sync-now">Sync now</button><button class="pill-btn ghost" data-act="reconnect">Reconnect</button><button class="pill-btn ghost" data-act="disconnect">Disconnect</button>' : '<button class="pill-btn" data-act="sync-now">Connect Google Drive</button>'}</div></div>
       ${installPrompt ? '<div class="card setting"><h3>Install app</h3><p>Add Personal Hub to your home screen or desktop.</p><div class="actions"><button class="pill-btn" data-act="install">Install</button></div></div>' : ''}
       <div class="card setting"><h3>Bill reminders</h3>
         ${Reminders.error === 'perm' ? '<div class="warnbox">Google Calendar access is missing. Tap <b>Allow Calendar</b> and tick the Calendar box. If it still fails, check that the Google Calendar API is enabled (setup guide, Step 2).</div>'
           : Reminders.error ? '<div class="warnbox">Reminders could not be updated last time. They will retry on the next sync.</div>' : ''}
-        <p>${Reminders.count()} bill${Reminders.count() === 1 ? ' has' : 's have'} reminders. ${c ? 'They are added to your Google Calendar at 9:00 AM, so your phone and computer notify you even when this app is closed.' : 'Connect Google Drive to send them to your Google Calendar, so your phone and computer notify you even when this app is closed.'} Set the timing for each bill when you add or edit it.</p>
+        <p>${Reminders.count()} reminder${Reminders.count() === 1 ? ' is' : 's are'} on (bills and vehicles). ${c ? 'They are added to your Google Calendar at 9:00 AM, so your phone and computer notify you even when this app is closed.' : 'Connect Google Drive to send them to your Google Calendar, so your phone and computer notify you even when this app is closed.'} Set the timing for each bill when you add or edit it.</p>
         ${c && Reminders.error === 'perm' ? '<div class="actions"><button class="pill-btn" data-act="allow-cal">Allow Calendar</button></div>' : ''}</div>
       <div class="card setting"><h3>Backup &amp; export</h3><p>${counts}</p>
         <div class="actions"><button class="pill-btn ghost" data-act="backup">Download backup</button>
@@ -778,25 +1129,35 @@ function settings() {
 
 // ---------- render & actions ----------
 const UI = { tab: LS.get('ph:tab') || 'home', buyList: 'essentials', buyStatus: 'planned', month: today().slice(0, 7), noteQuery: '' };
-const VIEWS = { home: ['Dashboard', vHome], buy: ['Purchase plan', vBuy], spend: ['Expenses', vSpend], bills: ['Bills', vBills], notes: ['Notes', vNotes] };
+const VIEWS = { home: ['Dashboard', vHome], buy: ['Purchase plan', vBuy], spend: ['Expenses', vSpend], bills: ['Bills', vBills], vehicles: ['Vehicles', vVehicles], notes: ['Notes', vNotes] };
 function render() {
   const [title, fn] = VIEWS[UI.tab] || VIEWS.home;
   $('#title').textContent = title;
   $('#view').innerHTML = fn();
   document.querySelectorAll('#tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.tab === UI.tab));
-  // Badge on the Bills tab: overdue or due within 2 days
-  const due = activeBills().filter((b) => daysUntil(b.due) <= 2).length, tab = $('#tabbar [data-tab=bills]');
-  let badge = tab.querySelector('.tbadge');
-  if (!badge) { badge = document.createElement('i'); badge.className = 'tbadge'; tab.appendChild(badge); }
-  badge.textContent = due; badge.hidden = !due;
+  // Tab badges: bills overdue or due within 2 days; vehicle items overdue or due soon
+  const setBadge = (name, n) => {
+    const tab = $(`#tabbar [data-tab=${name}]`); let badge = tab.querySelector('.tbadge');
+    if (!badge) { badge = document.createElement('i'); badge.className = 'tbadge'; tab.appendChild(badge); }
+    badge.textContent = n; badge.hidden = !n;
+  };
+  setBadge('bills', activeBills().filter((b) => daysUntil(b.due) <= 2).length);
+  setBadge('vehicles', vehicleDues().filter((x) => x.state === 'overdue' || x.state === 'soon').length);
   const s = $('#noteSearch');
   if (s) s.addEventListener('input', (e) => { UI.noteQuery = e.target.value; $('#notesGrid').innerHTML = notesGrid(); });
 }
 const byId = (col, id) => Store.get(col, id);
 const ACTIONS = {
   tab: (el) => { UI.tab = el.dataset.tab; LS.set('ph:tab', UI.tab); render(); window.scrollTo(0, 0); },
-  add: () => ({ home: expenseForm, spend: expenseForm, buy: purchaseForm, bills: billForm, notes: noteForm }[UI.tab] || expenseForm)(),
+  add: () => ({ home: expenseForm, spend: expenseForm, buy: purchaseForm, bills: billForm, vehicles: vehicleForm, notes: noteForm }[UI.tab] || expenseForm)(),
   close: closeSheet,
+  'v-add': () => vehicleForm(),
+  'v-edit': (el, id) => vehicleForm(byId('vehicles', id)),
+  'v-km': (el, id) => kmForm(byId('vehicles', id)),
+  'v-item': (el, id) => { const v = byId('vehicles', id); itemForm(v, vItem(v, el.dataset.item)); },
+  'v-additem': (el, id) => itemForm(byId('vehicles', id)),
+  'v-done': (el, id) => { const v = byId('vehicles', id); doneForm(v, vItem(v, el.dataset.item)); },
+  'v-history': (el, id) => historySheet(byId('vehicles', id)),
   'edit-purchase': (el, id) => purchaseForm(byId('purchases', id)),
   bought: (el, id) => markBought(byId('purchases', id)),
   unbuy: (el, id) => unBuy(byId('purchases', id)),
@@ -812,6 +1173,7 @@ const ACTIONS = {
   sync: () => Sync.tap(),
   settings,
   'sync-now': () => { closeSheet(); Sync.tap(); },
+  reconnect: () => { closeSheet(); if (Sync.ensureClient()) Sync.client.requestAccessToken({ prompt: 'consent' }); else Sync.signIn(); },
   'allow-cal': () => { closeSheet(); if (Sync.ensureClient()) Sync.client.requestAccessToken({ prompt: 'consent' }); else Sync.signIn(); },
   disconnect: async () => { if (await ask('Disconnect Google Drive on this device? Your data stays on this device and in Drive.', 'Disconnect')) { Sync.signOut(); settings(); } },
   install: async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; closeSheet(); },

@@ -1,6 +1,6 @@
 # Personal Hub: setup guide
 
-Your personal app for **purchase planning (Essentials & Lifestyle), expenses, bills and notes**, with a dashboard.
+Your personal app for **purchase planning (Essentials & Lifestyle), expenses, bills, vehicles and notes**, with a dashboard.
 It installs on your computer and your Galaxy S23, works offline, keeps its data in your own Google Drive, and puts bill reminders in your Google Calendar.
 
 **Time needed:** about 20 minutes, once. **Cost:** free.
@@ -92,6 +92,26 @@ Use the **same Google account** whose Drive should hold your data. Google rename
 - On your S23, make sure notifications are on for the **Google Calendar** app (Settings → Notifications → Calendar).
 - Inside the app, the **Bills** tab shows a red count for bills that are overdue or due within 2 days.
 - Reminders are created the next time the app syncs, so a bill added offline gets its reminder once you're back online.
+
+## Vehicles
+
+The **Vehicles** tab tracks your car and two-wheeler.
+
+- **Add a vehicle** with the **+** button: name, type (car or two-wheeler), registration number and current km. You can also enter the last service and alignment (date and km) and the PUC and insurance expiry dates. Leave blank anything you don't know and fill it in later.
+- **Items tracked:**
+
+  | Item | Car | Two-wheeler | Due by |
+  |---|---|---|---|
+  | General service | 10,000 km or 12 months | 3,000 km or 3 months | whichever comes first |
+  | Wheel alignment | 5,000 km or 6 months | not tracked | whichever comes first |
+  | PUC certificate | expiry date | expiry date | date |
+  | Insurance | expiry date | expiry date | date |
+
+  These intervals are common starting points. Tap any item to change them to match your owner's manual. **+ Add item** adds your own, such as tyre rotation or battery check.
+- **Update km** every few weeks. The app learns how much you drive and estimates the date you'll reach the km limit (shown as "About 25 Nov"). If a reading is over a month old, it asks you to update it.
+- **Done / Renewed:** enter the date, km reading and cost. The cost goes to Expenses under *Vehicle*, the next due date is worked out, and the entry is saved in the vehicle's **History**.
+- **Reminders:** each item gets a 9:00 AM Google Calendar event on its due date, with a notification 1 to 4 weeks before (your choice per item). The event moves automatically when you update km or mark an item done.
+- **Dashboard:** the **Vehicle due dates** card lists every service, PUC and insurance date across your vehicles, most urgent first. It is separate from bills.
 
 ## Good to know
 
