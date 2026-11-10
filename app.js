@@ -330,6 +330,24 @@ const Reminders = {
       extendedProperties: { private: { personalHubVehicle: `${v.id}:${it.id}` } },
     };
   },
+  noteEvent(n) {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata';
+    const start = new Date(n.remindAt + ':00'), end = new Date(start.getTime() + 15 * 60000);
+    const freq = { daily: 'DAILY', weekly: 'WEEKLY', monthly: 'MONTHLY', yearly: 'YEARLY' }[n.repeat];
+    const title = n.title || (n.body || '').split('\n')[0].slice(0, 60) || 'Note';
+    const open = (n.items || []).filter((i) => !i.done).map((i) => '☐ ' + i.text).join('\n');
+    return {
+      summary: 'Reminder: ' + title,
+      description: [n.body, open].filter(Boolean).join('\n\n') + '\n\nFrom your Personal Hub notes.',
+      start: { dateTime: localStamp(start) + ':00', timeZone: tz },
+      end: { dateTime: localStamp(end) + ':00', timeZone: tz },
+      // Monthly on the 29th-31st: use the last day in shorter months (same as the app shows)
+      recurrence: freq ? [`RRULE:FREQ=${freq}${freq === 'MONTHLY' && start.getDate() > 28 ? `;BYMONTHDAY=${Array.from({ length: start.getDate() - 27 }, (_, i) => 28 + i).join(',')};BYSETPOS=-1` : ''}`] : [],
+      reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 0 }] },
+      transparency: 'transparent',
+      extendedProperties: { private: { personalHubNote: n.id } },
+    };
+  },
   setError(msg) { this.error = msg; msg ? LS.set('ph:calError', msg) : LS.del('ph:calError'); },
   async sync() {
     const call = (url, method, body) => Sync.api(url, { method, headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
@@ -372,6 +390,20 @@ const Reminders = {
         }
         if (changed) Store.put('vehicles', { ...v, items });
       }
+      for (const n of all('notes')) {
+        const r = nextRemind(n);
+        if (r && !r.past) {
+          const sig = JSON.stringify([n.title, n.body, (n.items || []).map((i) => [i.text, i.done]), n.remindAt, n.repeat]);
+          if (n.calEventId && n.calSig === sig) continue;
+          let ev = null;
+          if (n.calEventId) { try { ev = await (await call(`${CAL}/${n.calEventId}`, 'PUT', this.noteEvent(n))).json(); } catch (e) { if (!/ 404| 410/.test(e.message)) throw e; } }
+          if (!ev) ev = await (await call(CAL, 'POST', this.noteEvent(n))).json();
+          Store.put('notes', { ...n, calEventId: ev.id, calSig: sig });
+        } else if (!n.remindAt && n.calEventId) {
+          try { await call(`${CAL}/${n.calEventId}`, 'DELETE'); } catch (e) { if (!/ 40[34]| 410/.test(e.message)) throw e; }
+          Store.put('notes', { ...n, calEventId: null, calSig: null });
+        } // a one-time reminder that has passed keeps its event
+      }
       Store.persist(); this.setError('');
     } catch (e) {
       if (e.message === 'auth') throw e;
@@ -379,7 +411,7 @@ const Reminders = {
       this.setError(/ 403/.test(e.message) ? 'perm' : 'fail');
     }
   },
-  count: () => all('bills').filter((b) => Reminders.wanted(b)).length + all('vehicles').reduce((a, v) => a + (v.items || []).filter((i) => i.remind && i.remind !== 'off').length, 0),
+  count: () => all('bills').filter((b) => Reminders.wanted(b)).length + all('vehicles').reduce((a, v) => a + (v.items || []).filter((i) => i.remind && i.remind !== 'off').length, 0) + all('notes').filter((n) => n.remindAt).length,
 };
 
 // ---------- sheet (dialog) & forms ----------
@@ -656,6 +688,44 @@ function vBills() {
 }
 
 // ---------- notes ----------
+// ---------- note reminders ----------
+const REPEAT = [['none', 'Does not repeat'], ['daily', 'Every day'], ['weekly', 'Every week'], ['monthly', 'Every month'], ['yearly', 'Every year']];
+const REPEAT_SHORT = { daily: 'Daily', weekly: 'Weekly', monthly: 'Monthly', yearly: 'Yearly' };
+const hhmm = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+const localStamp = (d) => `${localISO(d)}T${hhmm(d)}`;
+// Next time the reminder goes off (for repeating ones, the next one after now)
+function nextRemind(n) {
+  if (!n.remindAt) return null;
+  const first = new Date(n.remindAt + ':00'), nowD = new Date();
+  if (!n.repeat || n.repeat === 'none') return { at: first, past: first < nowD };
+  let t = new Date(first);
+  if (n.repeat === 'daily' || n.repeat === 'weekly') {
+    const step = n.repeat === 'daily' ? 1 : 7;
+    if (t < nowD) t.setDate(t.getDate() + Math.ceil((nowD - t) / (step * 864e5)) * step);
+    while (t < nowD) t.setDate(t.getDate() + step); // daylight-saving safety
+  } else {
+    const per = n.repeat === 'monthly' ? 1 : 12, day = first.getDate();
+    for (let k = 0; t < nowD && k < 1200; k += per) {
+      const y = first.getFullYear(), m = first.getMonth() + k, last = new Date(y, m + 1, 0).getDate();
+      t = new Date(y, m, Math.min(day, last), first.getHours(), first.getMinutes());
+    }
+  }
+  return { at: t, past: false };
+}
+function fmtWhen(d) {
+  const iso = localISO(d), n = daysUntil(iso);
+  const time = d.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+  const day = n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : n === -1 ? 'Yesterday'
+    : d.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', ...(d.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }) });
+  return `${day}, ${time}`;
+}
+const BELL = '<svg class="bell" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>';
+function remindChip(n) {
+  const r = nextRemind(n);
+  if (!r) return '';
+  return `<p class="rem${r.past ? ' past' : ''}">${BELL}${r.past ? 'Reminded ' : ''}${fmtWhen(r.at)}${n.repeat && n.repeat !== 'none' ? ' · ' + REPEAT_SHORT[n.repeat] : ''}</p>`;
+}
+
 function noteForm(n = {}) {
   const isNew = !n.id, items = n.items || [];
   const li = (it) => `<li class="${it.done ? 'done' : ''}" data-id="${esc(it.id)}"><input type="checkbox" ${it.done ? 'checked' : ''}><input type="text" value="${esc(it.text)}"><button type="button" data-rm aria-label="Remove">×</button></li>`;
@@ -668,6 +738,15 @@ function noteForm(n = {}) {
         <label class="field"><span>Note</span><textarea name="body" placeholder="Write anything…">${esc(n.body)}</textarea></label>
         <div class="field"><span>Checklist</span><ul class="checklist" id="cl">${items.map(li).join('')}</ul>
           <input id="newItem" placeholder="+ Add item, press Enter" style="margin-top:8px"></div>
+        <div class="field"><span>Reminder</span>
+          <div class="grid2"><input type="date" name="rDate" id="rDate" aria-label="Reminder date" value="${esc((n.remindAt || '').slice(0, 10))}">
+            <input type="time" name="rTime" id="rTime" aria-label="Reminder time" value="${esc((n.remindAt || '').slice(11, 16))}"></div>
+          <div class="grid2" style="margin-top:8px"><select name="rRepeat" id="rRepeat" aria-label="Repeat">${opts(REPEAT, n.repeat || 'none')}</select>
+            <button type="button" class="btn" id="rClear">Clear reminder</button></div>
+          <div class="quick"><button type="button" class="chip" data-q="1h">In 1 hour</button><button type="button" class="chip" data-q="eve">This evening, 6 pm</button>
+            <button type="button" class="chip" data-q="tom">Tomorrow, 9 am</button><button type="button" class="chip" data-q="sat">Saturday, 10 am</button></div>
+          <p class="hint" style="margin-top:8px">${Sync.connected() ? 'You get a notification on your phone and computer at this time (through Google Calendar).' : 'Connect Google Drive in Settings to get notifications at this time (through Google Calendar).'}</p>
+        </div>
         <label class="field check"><input type="checkbox" name="pinned" ${n.pinned ? 'checked' : ''}><span>Pin to Home</span></label>
       </div>
       <div class="sheet-foot">
@@ -681,35 +760,65 @@ function noteForm(n = {}) {
     ni.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addItem(); } });
     cl.addEventListener('click', (e) => { if (e.target.matches('[data-rm]')) e.target.closest('li').remove(); });
     cl.addEventListener('change', (e) => { if (e.target.type === 'checkbox') e.target.closest('li').classList.toggle('done', e.target.checked); });
+    const rD = form.elements.rDate, rT = form.elements.rTime, eve = $('[data-q=eve]', d);
+    if (new Date().getHours() >= 17) eve.hidden = true;
+    $('.quick', d).addEventListener('click', (e) => {
+      const q = e.target.closest('[data-q]')?.dataset.q; if (!q) return;
+      const t = new Date();
+      if (q === '1h') { t.setMinutes(t.getMinutes() + 60, 0, 0); }
+      else if (q === 'eve') t.setHours(18, 0, 0, 0);
+      else if (q === 'tom') { t.setDate(t.getDate() + 1); t.setHours(9, 0, 0, 0); }
+      else if (q === 'sat') { t.setDate(t.getDate() + (((6 - t.getDay()) + 7) % 7 || 7)); t.setHours(10, 0, 0, 0); }
+      rD.value = localISO(t); rT.value = hhmm(t);
+    });
+    $('#rClear', d).onclick = () => { rD.value = ''; rT.value = ''; form.elements.rRepeat.value = 'none'; };
+    rD.addEventListener('change', () => { if (rD.value && !rT.value) rT.value = '09:00'; });
+    rT.addEventListener('change', () => { if (rT.value && !rD.value) rD.value = today(); });
     form.addEventListener('submit', (e) => {
       e.preventDefault(); addItem();
+      const repeat = form.elements.rRepeat.value;
+      const remindAt = rD.value ? `${rD.value}T${rT.value || '09:00'}` : null;
+      if (remindAt && repeat === 'none' && remindAt !== n.remindAt && new Date(remindAt + ':00') < new Date()) {
+        toast('That time has already passed. Pick a later time.'); return;
+      }
       const v = {
         title: form.elements.title.value.trim(), body: form.elements.body.value.trim(), pinned: form.elements.pinned.checked,
+        remindAt, repeat: remindAt ? repeat : 'none',
         items: [...cl.children].map((x) => ({ id: x.dataset.id, text: x.querySelector('[type=text]').value.trim(), done: x.querySelector('[type=checkbox]').checked })).filter((x) => x.text),
       };
       closeSheet();
       if (isNew && !v.title && !v.body && !v.items.length) return;
-      Store.put('notes', { ...n, ...v }); commit(isNew ? 'Note saved' : 'Saved');
+      Store.put('notes', { ...n, ...v });
+      commit(remindAt && remindAt !== n.remindAt ? `Reminder set for ${fmtWhen(nextRemind(v).at)}` : isNew ? 'Note saved' : 'Saved');
     });
-    if (!isNew) $('#del', d).onclick = async () => { if (await ask('Delete this note?')) { Store.del('notes', n.id); closeSheet(); commit('Deleted'); } };
+    if (!isNew) $('#del', d).onclick = async () => { if (await ask('Delete this note?')) { Reminders.forget(n.calEventId); Store.del('notes', n.id); closeSheet(); commit('Deleted'); } };
   });
 }
 function noteCard(n) {
   const items = n.items || [], done = items.filter((i) => i.done).length;
   const preview = n.body || items.filter((i) => !i.done).slice(0, 4).map((i) => '☐ ' + i.text).join('\n');
   return `<div class="card note" data-act="edit-note" data-id="${n.id}">${n.pinned ? '<span class="pin">● Pinned</span>' : ''}
-    <h3>${esc(n.title || (n.body ? '' : 'Checklist'))}</h3><p>${esc(preview)}</p>
+    <h3>${esc(n.title || (n.body ? '' : 'Checklist'))}</h3>${remindChip(n)}<p>${esc(preview)}</p>
     ${items.length ? `<p style="margin-top:6px;font-size:12px">${done}/${items.length} done</p>` : ''}</div>`;
 }
 function notesGrid() {
-  const q = UI.noteQuery.toLowerCase();
-  const notes = all('notes').filter((n) => !q || [n.title, n.body, ...(n.items || []).map((i) => i.text)].join(' ').toLowerCase().includes(q))
-    .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updatedAt - a.updatedAt);
+  const q = UI.noteQuery.toLowerCase(), remOnly = UI.noteFilter === 'rem';
+  let notes = all('notes').filter((n) => !q || [n.title, n.body, ...(n.items || []).map((i) => i.text)].join(' ').toLowerCase().includes(q));
+  if (remOnly) {
+    // Upcoming first (soonest at the top), then ones that have passed
+    const key = (n) => { const r = nextRemind(n); return r.past ? 9e15 - r.at : +r.at; };
+    notes = notes.filter((n) => n.remindAt).sort((a, b) => key(a) - key(b));
+    if (!notes.length) return `<div class="card empty"><b>${q ? 'No matching reminders' : 'No reminders yet'}</b>${q ? '' : 'Open a note and set a date and time under Reminder.'}</div>`;
+  } else notes.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updatedAt - a.updatedAt);
   return notes.length ? `<div class="notes">${notes.map(noteCard).join('')}</div>`
     : `<div class="card empty"><b>${q ? 'No matching notes' : 'No notes yet'}</b>${q ? '' : 'Tap + for a note or checklist.'}</div>`;
 }
 function vNotes() {
-  return `<input class="search" id="noteSearch" type="search" placeholder="Search notes" value="${esc(UI.noteQuery)}"><div id="notesGrid">${notesGrid()}</div>`;
+  const ns = all('notes'), up = ns.filter((n) => { const r = nextRemind(n); return r && !r.past; }).length;
+  return `<input class="search" id="noteSearch" type="search" placeholder="Search notes" value="${esc(UI.noteQuery)}">
+    <div class="chips" style="margin-top:0"><button class="chip ${UI.noteFilter !== 'rem' ? 'on' : ''}" data-act="note-filter" data-v="all">All notes (${ns.length})</button>
+      <button class="chip ${UI.noteFilter === 'rem' ? 'on' : ''}" data-act="note-filter" data-v="rem">Reminders (${up} upcoming)</button></div>
+    <div id="notesGrid">${notesGrid()}</div>`;
 }
 
 // ---------- vehicles ----------
@@ -1110,7 +1219,7 @@ function settings() {
       <div class="card setting"><h3>Bill reminders</h3>
         ${Reminders.error === 'perm' ? '<div class="warnbox">Google Calendar access is missing. Tap <b>Allow Calendar</b> and tick the Calendar box. If it still fails, check that the Google Calendar API is enabled (setup guide, Step 2).</div>'
           : Reminders.error ? '<div class="warnbox">Reminders could not be updated last time. They will retry on the next sync.</div>' : ''}
-        <p>${Reminders.count()} reminder${Reminders.count() === 1 ? ' is' : 's are'} on (bills and vehicles). ${c ? 'They are added to your Google Calendar at 9:00 AM, so your phone and computer notify you even when this app is closed.' : 'Connect Google Drive to send them to your Google Calendar, so your phone and computer notify you even when this app is closed.'} Set the timing for each bill when you add or edit it.</p>
+        <p>${Reminders.count()} reminder${Reminders.count() === 1 ? ' is' : 's are'} on (bills, vehicles and notes). ${c ? 'They are added to your Google Calendar at 9:00 AM, so your phone and computer notify you even when this app is closed.' : 'Connect Google Drive to send them to your Google Calendar, so your phone and computer notify you even when this app is closed.'} Set the timing for each bill when you add or edit it.</p>
         ${c && Reminders.error === 'perm' ? '<div class="actions"><button class="pill-btn" data-act="allow-cal">Allow Calendar</button></div>' : ''}</div>
       <div class="card setting"><h3>Backup &amp; export</h3><p>${counts}</p>
         <div class="actions"><button class="pill-btn ghost" data-act="backup">Download backup</button>
@@ -1128,7 +1237,7 @@ function settings() {
 }
 
 // ---------- render & actions ----------
-const UI = { tab: LS.get('ph:tab') || 'home', buyList: 'essentials', buyStatus: 'planned', month: today().slice(0, 7), noteQuery: '' };
+const UI = { tab: LS.get('ph:tab') || 'home', buyList: 'essentials', buyStatus: 'planned', month: today().slice(0, 7), noteQuery: '', noteFilter: 'all' };
 const VIEWS = { home: ['Dashboard', vHome], buy: ['Purchase plan', vBuy], spend: ['Expenses', vSpend], bills: ['Bills', vBills], vehicles: ['Vehicles', vVehicles], notes: ['Notes', vNotes] };
 function render() {
   const [title, fn] = VIEWS[UI.tab] || VIEWS.home;
@@ -1170,6 +1279,7 @@ const ACTIONS = {
   'edit-bill': (el, id) => billForm(byId('bills', id)),
   pay: (el, id) => payBill(byId('bills', id)),
   'edit-note': (el, id) => noteForm(byId('notes', id)),
+  'note-filter': (el) => { UI.noteFilter = el.dataset.v; render(); },
   sync: () => Sync.tap(),
   settings,
   'sync-now': () => { closeSheet(); Sync.tap(); },

@@ -1,6 +1,6 @@
 // Offline support: keeps the app's own files cached so it opens without internet.
 // When you change any app file, bump the version below so phones pick up the update.
-const CACHE = 'personal-hub-v6';
+const CACHE = 'personal-hub-v7';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

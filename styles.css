@@ -277,3 +277,10 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .duecard .morerow { width: 100%; justify-content: center; border-left: 0; border-right: 0; border-bottom: 0; background: none; font-size: 13px; }
 .duecard .nudge { background: var(--warn-soft); }
 .duecard .nudge .m { color: var(--warn); white-space: normal; }
+
+/* Note reminders */
+.quick { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.quick .chip { font-size: 12.5px; }
+.note .rem { display: flex; align-items: flex-start; gap: 5px; margin: 0 0 6px; font-size: 12.5px; font-weight: 600; color: var(--accent); -webkit-line-clamp: unset; }
+.note .rem .bell { width: 14px; height: 14px; color: currentColor; flex: none; margin-top: 2px; }
+.note .rem.past { color: var(--muted); font-weight: 500; }

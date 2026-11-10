@@ -1,6 +1,6 @@
 # Personal Hub: setup guide
 
-Your personal app for **purchase planning (Essentials & Lifestyle), expenses, bills, vehicles and notes**, with a dashboard.
+Your personal app for **purchase planning (Essentials & Lifestyle), expenses, bills, vehicles and notes with reminders**, with a dashboard.
 It installs on your computer and your Galaxy S23, works offline, keeps its data in your own Google Drive, and puts bill reminders in your Google Calendar.
 
 **Time needed:** about 20 minutes, once. **Cost:** free.
@@ -112,6 +112,14 @@ The **Vehicles** tab tracks your car and two-wheeler.
 - **Done / Renewed:** enter the date, km reading and cost. The cost goes to Expenses under *Vehicle*, the next due date is worked out, and the entry is saved in the vehicle's **History**.
 - **Reminders:** each item gets a 9:00 AM Google Calendar event on its due date, with a notification 1 to 4 weeks before (your choice per item). The event moves automatically when you update km or mark an item done.
 - **Dashboard:** the **Vehicle due dates** card lists every service, PUC and insurance date across your vehicles, most urgent first. It is separate from bills.
+
+## Note reminders
+
+- Open any note and set a **date and time** under **Reminder**. The quick buttons fill in common times: in 1 hour, this evening at 6 pm, tomorrow at 9 am, or Saturday at 10 am.
+- Choose **Repeat** for regular things: every day, week, month or year.
+- At that time you get a notification on your phone and computer through Google Calendar (an event called *Reminder: …*), even when Personal Hub is closed. The checklist items that aren't ticked are in the event's description.
+- On the **Notes** tab, the **Reminders** filter lists every note with a reminder, soonest first. Each note shows its next reminder time with a bell.
+- Changing the time updates the calendar event, and **Clear reminder** or deleting the note removes it.
 
 ## Good to know
 
